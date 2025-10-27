@@ -35,6 +35,9 @@ onAuthStateChanged(auth, async (user) => {
             
             document.getElementById("profileNickname").innerText = userData.nickname || "Not set";
             document.getElementById("profileEmail").innerText = userData.email || user.email;
+
+            const numberOfBooks = userData.numberOfBooks || 0;   // until we can get this
+            document.getElementById("profileNrBooks").innerText = numberOfBooks;
         }
     } catch (error) {
         console.error("Error loading profile:", error);

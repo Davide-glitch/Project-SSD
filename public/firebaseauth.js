@@ -17,7 +17,11 @@ import {
     getFirestore, 
     setDoc, 
     doc,
-    getDoc 
+    getDoc,
+    query,
+    collection,
+    where,
+    getDocs
 } from "https://www.gstatic.com/firebasejs/10.11.1/firebase-firestore.js";
 
 import { firebaseConfig } from './firebaseConfig.js';
@@ -31,6 +35,28 @@ const db = getFirestore(app);
 setPersistence(auth, browserLocalPersistence).catch((error) => {
     console.error("Persistence error:", error);
 });
+
+// Utility function to check if nickname is unique
+async function isNicknameUnique(nickname) {
+    try {
+        const normalizedNickname = nickname.trim().toLowerCase();
+        console.log("Checking nickname uniqueness for:", normalizedNickname);
+        
+        const q = query(
+            collection(db, "users"), 
+            where("nicknameLower", "==", normalizedNickname)
+        );
+        
+        const querySnapshot = await getDocs(q);
+        const isUnique = querySnapshot.empty;
+        
+        console.log("Nickname unique:", isUnique);
+        return isUnique;
+    } catch (error) {
+        console.error("Error checking nickname:", error);
+        throw error;
+    }
+}
 
 // Utility function to show messages
 function showMessage(message, divId) {
@@ -48,47 +74,86 @@ function showMessage(message, divId) {
     }
 }
 
-// Function to handle user after social sign-in (Google/Facebook)
-async function handleSocialUser(user, provider, messageDiv) {
+// Function to handle SIGN UP with social providers (Google/Facebook)
+async function handleSocialSignUp(user, provider, messageDiv) {
     try {
         const userDocRef = doc(db, "users", user.uid);
         const userDoc = await getDoc(userDocRef);
         
-        // If user doesn't exist, prompt for nickname
-        if (!userDoc.exists()) {
-            let nickname = null;
-            
-            while (!nickname || nickname.trim().length < 3) {
-                nickname = prompt("Welcome! Please enter a nickname (minimum 3 characters):");
-                
-                if (nickname === null) {
-                    alert("A nickname is required to complete registration.");
-                    await auth.signOut();
-                    return false;
-                }
-                
-                if (nickname.trim().length < 3) {
-                    alert("Nickname must be at least 3 characters long.");
-                }
-            }
-            
-            await setDoc(userDocRef, {
-                email: user.email,
-                nickname: nickname.trim(),
-                uid: user.uid,
-                createdAt: new Date().toISOString(),
-                provider: provider,
-                displayName: user.displayName || nickname.trim(),
-                photoURL: user.photoURL || null
-            });
-            
-            console.log("User registered:", user.email);
+        // Check if user already exists
+        if (userDoc.exists()) {
+            // User already has an account - this shouldn't happen on sign up
+            showMessage('This account already exists. Please use Sign In instead.', messageDiv);
+            await auth.signOut();
+            return false;
         }
         
+        // New user - prompt for nickname
+        let nickname = null;
+        let isUnique = false;
+        
+        while (!nickname || nickname.trim().length < 3 || !isUnique) {
+            nickname = prompt("Welcome! Please enter a unique nickname (minimum 3 characters):");
+            
+            if (nickname === null) {
+                alert("A nickname is required to complete registration.");
+                await auth.signOut();
+                return false;
+            }
+            
+            if (nickname.trim().length < 3) {
+                alert("Nickname must be at least 3 characters long.");
+                continue;
+            }
+            
+            // Check if nickname is unique
+            isUnique = await isNicknameUnique(nickname);
+            if (!isUnique) {
+                alert("This nickname is already taken. Please choose another one.");
+            }
+        }
+        
+        await setDoc(userDocRef, {
+            email: user.email,
+            nickname: nickname.trim(),
+            nicknameLower: nickname.trim().toLowerCase(),
+            uid: user.uid,
+            createdAt: new Date().toISOString(),
+            provider: provider,
+            displayName: user.displayName || nickname.trim(),
+            photoURL: user.photoURL || null
+        });
+        
+        console.log("User registered:", user.email);
         localStorage.setItem("loggedInUserId", user.uid);
         return true;
     } catch (error) {
-        console.error("Error handling social user:", error);
+        console.error("Error handling social sign up:", error);
+        showMessage("Error: " + error.message, messageDiv);
+        return false;
+    }
+}
+
+// Function to handle SIGN IN with social providers (Google/Facebook)
+async function handleSocialSignIn(user, provider, messageDiv) {
+    try {
+        const userDocRef = doc(db, "users", user.uid);
+        const userDoc = await getDoc(userDocRef);
+        
+        // Check if user exists
+        if (!userDoc.exists()) {
+            // User doesn't have an account - redirect to sign up
+            showMessage('No account found. Please Sign Up first.', messageDiv);
+            await auth.signOut();
+            return false;
+        }
+        
+        // User exists - sign in successful
+        console.log("User signed in:", user.email);
+        localStorage.setItem("loggedInUserId", user.uid);
+        return true;
+    } catch (error) {
+        console.error("Error handling social sign in:", error);
         showMessage("Error: " + error.message, messageDiv);
         return false;
     }
@@ -103,11 +168,20 @@ async function handleSocialUser(user, provider, messageDiv) {
         if (result && result.user) {
             console.log("Redirect successful:", result.user.email);
             
-            // Determine provider from result
             const providerId = result.providerId || result.user.providerData[0]?.providerId;
             const provider = providerId === 'facebook.com' ? 'facebook' : 'google';
             
-            const success = await handleSocialUser(result.user, provider, 'signInMessage');
+            // Check if this was a sign up or sign in attempt
+            // We'll use sessionStorage to track this
+            const isSignUpAttempt = sessionStorage.getItem('socialAuthType') === 'signup';
+            sessionStorage.removeItem('socialAuthType');
+            
+            let success;
+            if (isSignUpAttempt) {
+                success = await handleSocialSignUp(result.user, provider, 'signInMessage');
+            } else {
+                success = await handleSocialSignIn(result.user, provider, 'signInMessage');
+            }
             
             if (success) {
                 window.location.href = "homepage.html";
@@ -161,9 +235,13 @@ if (signUp) {
     signUp.addEventListener('click', async (event) => {
         event.preventDefault();
         
+        console.log("Sign up button clicked");
+        
         const email = document.getElementById('rEmail').value;
         const password = document.getElementById('rPassword').value;
         const nickname = document.getElementById('nickname').value;
+
+        console.log("Form values - Email:", email, "Nickname:", nickname);
 
         if (!email || !password || !nickname) {
             showMessage('Please fill all fields', 'signUpMessage');
@@ -176,21 +254,34 @@ if (signUp) {
         }
 
         try {
+            // Check if nickname is unique
+            showMessage('Checking nickname availability...', 'signUpMessage');
+            const isUnique = await isNicknameUnique(nickname);
+            
+            if (!isUnique) {
+                showMessage('This nickname is already taken. Please choose another one.', 'signUpMessage');
+                return;
+            }
+
+            showMessage('Creating account...', 'signUpMessage');
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
             const user = userCredential.user;
             
             const userData = {
                 email: email,
                 nickname: nickname.trim(),
+                nicknameLower: nickname.trim().toLowerCase(),
                 uid: user.uid,
                 createdAt: new Date().toISOString(),
                 provider: 'email'
             };
             
-            showMessage('Account Created Successfully', 'signUpMessage');
+            showMessage('Saving user data...', 'signUpMessage');
             
             const docRef = doc(db, "users", user.uid);
             await setDoc(docRef, userData);
+            
+            showMessage('Account Created Successfully', 'signUpMessage');
             
             document.getElementById('rEmail').value = '';
             document.getElementById('rPassword').value = '';
@@ -204,6 +295,7 @@ if (signUp) {
             }, 1500);
             
         } catch (error) {
+            console.error("Sign up error:", error);
             const errorCode = error.code;
             if (errorCode === 'auth/email-already-in-use') {
                 showMessage("Email Address already in use!", 'signUpMessage');
@@ -212,9 +304,8 @@ if (signUp) {
             } else if (errorCode === 'auth/invalid-email') {
                 showMessage("Invalid email address", 'signUpMessage');
             } else {
-                showMessage("Unable to create user", 'signUpMessage');
+                showMessage("Unable to create user: " + error.message, 'signUpMessage');
             }
-            console.error("Sign up error:", error);
         }
     });
 }
@@ -270,7 +361,7 @@ if (googleSignUpBtn) {
         
         try {
             const result = await signInWithPopup(auth, provider);
-            const success = await handleSocialUser(result.user, 'google', 'signUpMessage');
+            const success = await handleSocialSignUp(result.user, 'google', 'signUpMessage');
             
             if (success) {
                 showMessage('Sign up successful! Redirecting...', 'signUpMessage');
@@ -284,6 +375,7 @@ if (googleSignUpBtn) {
             
             if (error.code === 'auth/popup-blocked') {
                 showMessage('Popup blocked. Using redirect instead...', 'signUpMessage');
+                sessionStorage.setItem('socialAuthType', 'signup');
                 try {
                     await signInWithRedirect(auth, provider);
                 } catch (redirectError) {
@@ -313,7 +405,7 @@ if (googleSignInBtn) {
         
         try {
             const result = await signInWithPopup(auth, provider);
-            const success = await handleSocialUser(result.user, 'google', 'signInMessage');
+            const success = await handleSocialSignIn(result.user, 'google', 'signInMessage');
             
             if (success) {
                 showMessage('Sign in successful! Redirecting...', 'signInMessage');
@@ -327,6 +419,7 @@ if (googleSignInBtn) {
             
             if (error.code === 'auth/popup-blocked') {
                 showMessage('Popup blocked. Using redirect instead...', 'signInMessage');
+                sessionStorage.setItem('socialAuthType', 'signin');
                 try {
                     await signInWithRedirect(auth, provider);
                 } catch (redirectError) {
@@ -350,10 +443,12 @@ const facebookSignUpBtn = document.getElementById('facebookSignUpBtn');
 if (facebookSignUpBtn) {
     facebookSignUpBtn.addEventListener('click', async () => {
         const provider = new FacebookAuthProvider();
+        provider.addScope('email');
+        provider.addScope('public_profile');
         
         try {
             const result = await signInWithPopup(auth, provider);
-            const success = await handleSocialUser(result.user, 'facebook', 'signUpMessage');
+            const success = await handleSocialSignUp(result.user, 'facebook', 'signUpMessage');
             
             if (success) {
                 showMessage('Sign up successful! Redirecting...', 'signUpMessage');
@@ -367,6 +462,7 @@ if (facebookSignUpBtn) {
             
             if (error.code === 'auth/popup-blocked') {
                 showMessage('Popup blocked. Using redirect instead...', 'signUpMessage');
+                sessionStorage.setItem('socialAuthType', 'signup');
                 try {
                     await signInWithRedirect(auth, provider);
                 } catch (redirectError) {
@@ -392,10 +488,12 @@ const facebookSignInBtn = document.getElementById('facebookSignInBtn');
 if (facebookSignInBtn) {
     facebookSignInBtn.addEventListener('click', async () => {
         const provider = new FacebookAuthProvider();
+        provider.addScope('email');
+        provider.addScope('public_profile');
         
         try {
             const result = await signInWithPopup(auth, provider);
-            const success = await handleSocialUser(result.user, 'facebook', 'signInMessage');
+            const success = await handleSocialSignIn(result.user, 'facebook', 'signInMessage');
             
             if (success) {
                 showMessage('Sign in successful! Redirecting...', 'signInMessage');
@@ -409,6 +507,7 @@ if (facebookSignInBtn) {
             
             if (error.code === 'auth/popup-blocked') {
                 showMessage('Popup blocked. Using redirect instead...', 'signInMessage');
+                sessionStorage.setItem('socialAuthType', 'signin');
                 try {
                     await signInWithRedirect(auth, provider);
                 } catch (redirectError) {
